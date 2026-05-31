@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import shutil
 import sys
 from pathlib import Path
@@ -19,8 +20,11 @@ from nodestrap.config import (
     validate_config,
     write_config,
 )
+from nodestrap.executor import CommandRunner, SubprocessRunner, execute_host_plan
+from nodestrap.payload import describe_plan_steps
 from nodestrap.paths import config_path, logs_dir
 from nodestrap.plan import build_host_plans
+from nodestrap.state import mark_host_completed, mark_host_failed
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -78,11 +82,15 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--host")
     run.add_argument("--status", default="new")
     run.add_argument("--dry-run", action="store_true")
+    run.add_argument("--execute", action="store_true", help="Actually connect to selected hosts.")
+    run.add_argument("--ask-sudo-password", action="store_true", help="Prompt once and pass sudo password over stdin.")
     run.set_defaults(func=cmd_run)
 
     retry = subparsers.add_parser("retry", help="Run hosts with retry status.")
     retry.add_argument("host", nargs="?")
     retry.add_argument("--dry-run", action="store_true")
+    retry.add_argument("--execute", action="store_true", help="Actually connect to selected hosts.")
+    retry.add_argument("--ask-sudo-password", action="store_true", help="Prompt once and pass sudo password over stdin.")
     retry.set_defaults(func=cmd_retry)
 
     status = subparsers.add_parser("status", help="Show hosts grouped by status.")
@@ -155,22 +163,42 @@ def cmd_host_add(args: argparse.Namespace) -> int:
     write_config(args.config, data)
     print(f"added host {args.host}")
     if args.run:
-        return _run(args.config, host=args.host, status="new", dry_run=True)
+        return _run(args.config, host=args.host, status="new", dry_run=True, execute=False)
     return 0
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    if not args.dry_run:
-        print("error: remote execution is not implemented yet; use --dry-run", file=sys.stderr)
+    if args.dry_run and args.execute:
+        print("error: choose either --dry-run or --execute", file=sys.stderr)
         return 2
-    return _run(args.config, host=args.host, status=args.status, dry_run=args.dry_run)
+    if not args.dry_run and not args.execute:
+        print("error: use --dry-run to preview or --execute to connect to hosts", file=sys.stderr)
+        return 2
+    return _run(
+        args.config,
+        host=args.host,
+        status=args.status,
+        dry_run=args.dry_run,
+        execute=args.execute,
+        ask_sudo_password=args.ask_sudo_password,
+    )
 
 
 def cmd_retry(args: argparse.Namespace) -> int:
-    if not args.dry_run:
-        print("error: remote execution is not implemented yet; use --dry-run", file=sys.stderr)
+    if args.dry_run and args.execute:
+        print("error: choose either --dry-run or --execute", file=sys.stderr)
         return 2
-    return _run(args.config, host=args.host, status="retry", dry_run=args.dry_run)
+    if not args.dry_run and not args.execute:
+        print("error: use --dry-run to preview or --execute to connect to hosts", file=sys.stderr)
+        return 2
+    return _run(
+        args.config,
+        host=args.host,
+        status="retry",
+        dry_run=args.dry_run,
+        execute=args.execute,
+        ask_sudo_password=args.ask_sudo_password,
+    )
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -193,7 +221,17 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run(config: Path, *, host: str | None, status: str, dry_run: bool) -> int:
+def _run(
+    config: Path,
+    *,
+    host: str | None,
+    status: str,
+    dry_run: bool,
+    execute: bool,
+    runner: CommandRunner | None = None,
+    log_dir: Path | None = None,
+    ask_sudo_password: bool = False,
+) -> int:
     data = load_config(config)
     issues = validate_config(data, keys_base=config.parent / "keys")
     if issues:
@@ -202,7 +240,12 @@ def _run(config: Path, *, host: str | None, status: str, dry_run: bool) -> int:
         return 1
 
     selected = selected_hosts(data, host=host, status=status)
-    plans = build_host_plans(selected, data.get("defaults"))
+    plans = build_host_plans(
+        selected,
+        data.get("defaults"),
+        config=data,
+        keys_base=config.parent / "keys",
+    )
     if dry_run:
         print(f"dry run: {len(plans)} host(s) selected")
         for plan in plans:
@@ -214,7 +257,60 @@ def _run(config: Path, *, host: str | None, status: str, dry_run: bool) -> int:
                 f"port={plan.ssh_port} "
                 f"disable_password_auth={str(plan.disable_password_auth).lower()}"
             )
+            for step in describe_plan_steps(plan):
+                print(f"  - {step}")
+    if execute:
+        sudo_password = getpass.getpass("Sudo password: ") if ask_sudo_password else None
+        return _execute_plans(
+            config,
+            data,
+            plans,
+            runner=runner or SubprocessRunner(),
+            log_dir=log_dir,
+            sudo_password=sudo_password,
+        )
     return 0
+
+
+def _execute_plans(
+    config: Path,
+    data: dict,
+    plans,
+    *,
+    runner: CommandRunner,
+    log_dir: Path | None = None,
+    sudo_password: str | None = None,
+) -> int:
+    if not plans:
+        print("no hosts selected")
+        return 0
+
+    failures = 0
+    for plan in plans:
+        print(f"running {plan.host}")
+        result = execute_host_plan(
+            plan,
+            runner=runner,
+            log_dir=log_dir or logs_dir(),
+            sudo_password=sudo_password,
+        )
+        if result.succeeded and result.completed_at is not None:
+            mark_host_completed(data, result.host, completed_at=result.completed_at)
+            print(f"completed {result.host}")
+        else:
+            failures += 1
+            mark_host_failed(data, result.host, error=result.message, retryable=result.status == "retry")
+            print(f"failed {result.host}: {result.message}", file=sys.stderr)
+        try:
+            write_config(config, data)
+        except ConfigError:
+            print(
+                f"error: remote result for {result.host} was {result.status}, "
+                "but local config could not be updated",
+                file=sys.stderr,
+            )
+            raise
+    return 1 if failures else 0
 
 
 def _load_or_empty(path: Path) -> dict:

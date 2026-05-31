@@ -47,23 +47,40 @@ class ConfigValidationTests(unittest.TestCase):
 
     def test_reports_unknown_references_and_duplicate_hosts(self):
         data = {
+            "defaults": {
+                "connect_user": "bad user",
+                "ssh_port": 70000,
+                "disable_password_auth": "yes",
+            },
             "keys": {},
             "users": {
                 "rion": {
-                    "username": "rion",
+                    "username": "Rion",
                     "public_keys": ["missing_key"],
                 },
             },
             "hosts": [
-                {"host": "node.example.com", "status": "mystery", "users": ["missing_user"]},
+                {
+                    "host": "node.example.com",
+                    "status": "mystery",
+                    "users": ["missing_user"],
+                    "ssh_port": 0,
+                    "disable_password_auth": "false",
+                },
                 {"host": "node.example.com", "status": "new", "users": ["rion"]},
             ],
         }
 
         messages = [issue.message for issue in validate_config(data)]
 
+        self.assertIn("defaults.connect_user is not a valid account name: bad user", messages)
+        self.assertIn("defaults.ssh_port must be an integer between 1 and 65535.", messages)
+        self.assertIn("defaults.disable_password_auth must be a boolean.", messages)
+        self.assertIn("users.rion.username is not a valid account name: Rion", messages)
         self.assertIn("users.rion references unknown key: missing_key", messages)
         self.assertIn("hosts[0].status is invalid: mystery", messages)
+        self.assertIn("hosts[0].ssh_port must be an integer between 1 and 65535.", messages)
+        self.assertIn("hosts[0].disable_password_auth must be a boolean.", messages)
         self.assertIn("hosts[0] references unknown user: missing_user", messages)
         self.assertIn("duplicate host entry: node.example.com", messages)
 

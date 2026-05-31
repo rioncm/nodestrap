@@ -5,10 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 VALID_HOST_STATUSES = frozenset({"new", "completed", "retry", "failed", "skipped"})
 DEFAULT_HOST_STATUS = "new"
+ACCOUNT_NAME_PATTERN = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,7 @@ def validate_config(data: dict[str, Any], *, keys_base: Path | None = None) -> l
 
     issues: list[ValidationIssue] = []
 
+    defaults = _mapping(data.get("defaults"), "defaults", issues)
     keys = _mapping(data.get("keys"), "keys", issues)
     users = _mapping(data.get("users"), "users", issues)
     hosts = data.get("hosts", [])
@@ -76,6 +79,7 @@ def validate_config(data: dict[str, Any], *, keys_base: Path | None = None) -> l
         issues.append(ValidationIssue("hosts must be a list."))
         hosts = []
 
+    _validate_defaults(defaults, issues)
     _validate_keys(keys, keys_base, issues)
     _validate_users(users, keys, issues)
     _validate_hosts(hosts, users, issues)
@@ -229,6 +233,14 @@ def _validate_keys(
             issues.append(ValidationIssue(f"keys.{key_name}.file does not exist: {key_file}"))
 
 
+def _validate_defaults(defaults: dict[str, Any], issues: list[ValidationIssue]) -> None:
+    _validate_optional_account_name(defaults.get("connect_user"), "defaults.connect_user", issues)
+    _validate_optional_account_name(defaults.get("managed_user"), "defaults.managed_user", issues)
+    _validate_optional_port(defaults.get("ssh_port"), "defaults.ssh_port", issues)
+    if "disable_password_auth" in defaults and not isinstance(defaults["disable_password_auth"], bool):
+        issues.append(ValidationIssue("defaults.disable_password_auth must be a boolean."))
+
+
 def _validate_users(
     users: dict[str, Any],
     keys: dict[str, Any],
@@ -244,6 +256,8 @@ def _validate_users(
         username = user_data.get("username")
         if not isinstance(username, str) or not username:
             issues.append(ValidationIssue(f"users.{user_name}.username must be a non-empty string."))
+        elif not _valid_account_name(username):
+            issues.append(ValidationIssue(f"users.{user_name}.username is not a valid account name: {username}"))
         public_keys = user_data.get("public_keys", [])
         if not isinstance(public_keys, list):
             issues.append(ValidationIssue(f"users.{user_name}.public_keys must be a list."))
@@ -279,6 +293,11 @@ def _validate_hosts(
         if status not in VALID_HOST_STATUSES:
             issues.append(ValidationIssue(f"{label}.status is invalid: {status}"))
 
+        _validate_optional_account_name(host_data.get("connect_user"), f"{label}.connect_user", issues)
+        _validate_optional_port(host_data.get("ssh_port"), f"{label}.ssh_port", issues)
+        if "disable_password_auth" in host_data and not isinstance(host_data["disable_password_auth"], bool):
+            issues.append(ValidationIssue(f"{label}.disable_password_auth must be a boolean."))
+
         host_users = host_data.get("users", [])
         if not isinstance(host_users, list) or not host_users:
             issues.append(ValidationIssue(f"{label}.users must be a non-empty list."))
@@ -293,6 +312,31 @@ def _default_host_users(defaults: dict[str, Any]) -> list[str]:
     if isinstance(managed_user, str) and managed_user:
         return [managed_user]
     return []
+
+
+def _valid_account_name(value: str) -> bool:
+    return bool(ACCOUNT_NAME_PATTERN.fullmatch(value))
+
+
+def _validate_optional_account_name(
+    value: Any,
+    label: str,
+    issues: list[ValidationIssue],
+) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str) or not value:
+        issues.append(ValidationIssue(f"{label} must be a non-empty string or null."))
+        return
+    if not _valid_account_name(value):
+        issues.append(ValidationIssue(f"{label} is not a valid account name: {value}"))
+
+
+def _validate_optional_port(value: Any, label: str, issues: list[ValidationIssue]) -> None:
+    if value is None:
+        return
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1 or value > 65535:
+        issues.append(ValidationIssue(f"{label} must be an integer between 1 and 65535."))
 
 
 def _load_json_compatible_yaml(path: Path, original_error: ModuleNotFoundError) -> dict[str, Any]:
