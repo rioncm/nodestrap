@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nodestrap"
+version = "0.1.0"
+description = "Bootstrap SSH access, sudo, and host state for managed nodes."
+readme = "docs/README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+  { name = "Rion" }
+]
+dependencies = [
+  "PyYAML>=6.0"
+]
+
+[project.scripts]
+nodestrap = "nodestrap.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nodestrap"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
