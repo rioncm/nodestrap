@@ -86,6 +86,102 @@ class CliTests(unittest.TestCase):
         self.assertIn("install 1 public key(s) for rion", output)
         self.assertIn("disable password SSH for rion after key login succeeds", output)
 
+    def test_setup_sets_defaults_and_imports_public_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "nodestrap.yaml"
+            ssh_dir = root / ".ssh"
+            ssh_dir.mkdir()
+            (ssh_dir / "id_ed25519.pub").write_text("ssh-ed25519 AAAATEST user@example\n", encoding="utf-8")
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = main(
+                    [
+                        "--config",
+                        str(config),
+                        "setup",
+                        "--connect-user",
+                        "admin",
+                        "--managed-user",
+                        "rion",
+                        "--default-key",
+                        "id_ed25519",
+                        "--ssh-port",
+                        "2222",
+                        "--no-disable-password-auth",
+                        "--import-ssh-keys",
+                        "--ssh-dir",
+                        str(ssh_dir),
+                    ]
+                )
+            data = load_config(config)
+
+        self.assertEqual(0, code)
+        self.assertEqual("admin", data["defaults"]["connect_user"])
+        self.assertEqual("rion", data["defaults"]["managed_user"])
+        self.assertEqual("id_ed25519", data["defaults"]["public_key"])
+        self.assertEqual(2222, data["defaults"]["ssh_port"])
+        self.assertFalse(data["defaults"]["disable_password_auth"])
+        self.assertEqual("id_ed25519.pub", data["keys"]["id_ed25519"]["file"])
+
+    def test_key_add_refuses_duplicate_without_force(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "nodestrap.yaml"
+            key = root / "home.pub"
+            key.write_text("ssh-ed25519 AAAATEST user@example\n", encoding="utf-8")
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                first = main(["--config", str(config), "key", "add", str(key), "--name", "home"])
+            with contextlib.redirect_stderr(io.StringIO()):
+                second = main(["--config", str(config), "key", "add", str(key), "--name", "home"])
+
+        self.assertEqual(0, first)
+        self.assertEqual(2, second)
+
+    def test_user_add_uses_default_key_when_key_is_omitted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "nodestrap.yaml"
+            write_config(
+                config,
+                {
+                    "defaults": {"public_key": "home"},
+                    "keys": {"home": {"file": "home.pub"}},
+                    "users": {},
+                    "hosts": [],
+                },
+            )
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = main(["--config", str(config), "user", "add", "rion"])
+            data = load_config(config)
+
+        self.assertEqual(0, code)
+        self.assertEqual(["home"], data["users"]["rion"]["public_keys"])
+
+    def test_host_add_uses_default_managed_user(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "nodestrap.yaml"
+            write_config(
+                config,
+                {
+                    "defaults": {"connect_user": "admin", "managed_user": "rion"},
+                    "keys": {},
+                    "users": {"rion": {"username": "rion", "public_keys": []}},
+                    "hosts": [],
+                },
+            )
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = main(["--config", str(config), "host", "add", "node.example.com"])
+            data = load_config(config)
+
+        self.assertEqual(0, code)
+        self.assertEqual("admin", data["hosts"][0]["connect_user"])
+        self.assertEqual(["rion"], data["hosts"][0]["users"])
+
     def test_execute_updates_host_state_with_injected_runner(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

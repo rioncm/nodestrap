@@ -79,7 +79,7 @@ def validate_config(data: dict[str, Any], *, keys_base: Path | None = None) -> l
         issues.append(ValidationIssue("hosts must be a list."))
         hosts = []
 
-    _validate_defaults(defaults, issues)
+    _validate_defaults(defaults, keys, issues)
     _validate_keys(keys, keys_base, issues)
     _validate_users(users, keys, issues)
     _validate_hosts(hosts, users, issues)
@@ -102,6 +102,55 @@ def empty_config() -> dict[str, Any]:
         "users": {},
         "hosts": [],
     }
+
+
+def set_defaults(
+    data: dict[str, Any],
+    *,
+    connect_user: str | None = None,
+    managed_user: str | None = None,
+    public_key: str | None = None,
+    ssh_port: int | None = None,
+    disable_password_auth: bool | None = None,
+) -> dict[str, Any]:
+    """Update configured defaults with provided values."""
+
+    defaults = data.setdefault("defaults", {})
+    if not isinstance(defaults, dict):
+        raise ConfigError("defaults must be a mapping before updating defaults.")
+    if connect_user is not None:
+        defaults["connect_user"] = connect_user
+    if managed_user is not None:
+        defaults["managed_user"] = managed_user
+    if public_key is not None:
+        defaults["public_key"] = public_key
+    if ssh_port is not None:
+        defaults["ssh_port"] = ssh_port
+    if disable_password_auth is not None:
+        defaults["disable_password_auth"] = disable_password_auth
+    return data
+
+
+def add_key(
+    data: dict[str, Any],
+    name: str,
+    *,
+    file: str,
+    label: str | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Return config data with a public-key definition added or updated."""
+
+    keys = data.setdefault("keys", {})
+    if not isinstance(keys, dict):
+        raise ConfigError("keys must be a mapping before adding a key.")
+    if name in keys and not force:
+        raise ConfigError(f"Key already exists: {name}")
+    keys[name] = {
+        "file": file,
+        "label": label or name.replace("_", " "),
+    }
+    return data
 
 
 def add_host(
@@ -233,12 +282,19 @@ def _validate_keys(
             issues.append(ValidationIssue(f"keys.{key_name}.file does not exist: {key_file}"))
 
 
-def _validate_defaults(defaults: dict[str, Any], issues: list[ValidationIssue]) -> None:
+def _validate_defaults(
+    defaults: dict[str, Any],
+    keys: dict[str, Any],
+    issues: list[ValidationIssue],
+) -> None:
     _validate_optional_account_name(defaults.get("connect_user"), "defaults.connect_user", issues)
     _validate_optional_account_name(defaults.get("managed_user"), "defaults.managed_user", issues)
     _validate_optional_port(defaults.get("ssh_port"), "defaults.ssh_port", issues)
     if "disable_password_auth" in defaults and not isinstance(defaults["disable_password_auth"], bool):
         issues.append(ValidationIssue("defaults.disable_password_auth must be a boolean."))
+    public_key = defaults.get("public_key")
+    if public_key is not None and public_key not in keys:
+        issues.append(ValidationIssue(f"defaults.public_key references unknown key: {public_key}"))
 
 
 def _validate_users(

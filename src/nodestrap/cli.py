@@ -12,15 +12,18 @@ from nodestrap import __version__
 from nodestrap.config import (
     ConfigError,
     add_host,
+    add_key,
     add_user,
     empty_config,
     hosts_by_status,
     load_config,
     selected_hosts,
+    set_defaults,
     validate_config,
     write_config,
 )
 from nodestrap.executor import CommandRunner, SubprocessRunner, execute_host_plan
+from nodestrap.keys import discover_public_keys, key_name_from_path, read_public_key
 from nodestrap.payload import describe_plan_steps
 from nodestrap.paths import config_path, logs_dir
 from nodestrap.plan import build_host_plans
@@ -50,6 +53,19 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     setup = subparsers.add_parser("setup", help="Create Nodestrap config and state directories.")
+    setup.add_argument("--connect-user")
+    setup.add_argument("--managed-user")
+    setup.add_argument("--default-key")
+    setup.add_argument("--ssh-port", type=int)
+    setup.add_argument(
+        "--disable-password-auth",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Set the default managed-user password SSH policy.",
+    )
+    setup.add_argument("--import-ssh-keys", action="store_true", help="Copy public keys from an SSH directory.")
+    setup.add_argument("--ssh-dir", type=Path, default=Path.home() / ".ssh")
+    setup.add_argument("--force", action="store_true", help="Overwrite imported key definitions.")
     setup.set_defaults(func=cmd_setup)
 
     key = subparsers.add_parser("key", help="Manage public keys.")
@@ -57,6 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
     key_add = key_subparsers.add_parser("add", help="Copy a public key into Nodestrap config.")
     key_add.add_argument("path", type=Path)
     key_add.add_argument("--name")
+    key_add.add_argument("--label")
+    key_add.add_argument("--force", action="store_true")
     key_add.set_defaults(func=cmd_key_add)
 
     user = subparsers.add_parser("user", help="Manage user definitions.")
@@ -109,10 +127,24 @@ def cmd_setup(args: argparse.Namespace) -> int:
     log_dir = logs_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
     if not args.config.exists():
-        write_config(args.config, empty_config())
+        data = empty_config()
         print(f"created {args.config}")
     else:
+        data = load_config(args.config)
         print(f"exists {args.config}")
+
+    set_defaults(
+        data,
+        connect_user=args.connect_user,
+        managed_user=args.managed_user,
+        public_key=args.default_key,
+        ssh_port=args.ssh_port,
+        disable_password_auth=args.disable_password_auth,
+    )
+    if args.import_ssh_keys:
+        imported = _import_public_keys(data, args.config, args.ssh_dir, force=args.force)
+        print(f"imported {imported} key(s) from {args.ssh_dir}")
+    write_config(args.config, data)
     print(f"created {config_keys_dir}")
     print(f"created {log_dir}")
     return 0
@@ -120,18 +152,14 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
 def cmd_key_add(args: argparse.Namespace) -> int:
     data = _load_or_empty(args.config)
-    source = args.path
-    if not source.exists():
-        raise ConfigError(f"Public key not found: {source}")
-    name = args.name or source.stem
-    destination_dir = args.config.parent / "keys"
-    destination_dir.mkdir(parents=True, exist_ok=True)
-    destination = destination_dir / source.name
-    shutil.copyfile(source, destination)
-    data.setdefault("keys", {})[name] = {
-        "file": source.name,
-        "label": name.replace("_", " "),
-    }
+    name, destination = _copy_public_key(
+        data,
+        args.config,
+        args.path,
+        name=args.name,
+        label=args.label,
+        force=args.force,
+    )
     write_config(args.config, data)
     print(f"added key {name}: {destination}")
     return 0
@@ -139,11 +167,15 @@ def cmd_key_add(args: argparse.Namespace) -> int:
 
 def cmd_user_add(args: argparse.Namespace) -> int:
     data = _load_or_empty(args.config)
+    defaults = data.get("defaults") if isinstance(data.get("defaults"), dict) else {}
+    public_keys = args.keys
+    if not public_keys and isinstance(defaults.get("public_key"), str):
+        public_keys = [defaults["public_key"]]
     add_user(
         data,
         args.name,
         username=args.username,
-        public_keys=args.keys,
+        public_keys=public_keys,
         force=args.force,
     )
     write_config(args.config, data)
@@ -317,6 +349,35 @@ def _load_or_empty(path: Path) -> dict:
     if path.exists():
         return load_config(path)
     return empty_config()
+
+
+def _import_public_keys(data: dict, config: Path, ssh_dir: Path, *, force: bool) -> int:
+    imported = 0
+    for source in discover_public_keys(ssh_dir):
+        _copy_public_key(data, config, source, name=None, label=None, force=force)
+        imported += 1
+    return imported
+
+
+def _copy_public_key(
+    data: dict,
+    config: Path,
+    source: Path,
+    *,
+    name: str | None,
+    label: str | None,
+    force: bool,
+) -> tuple[str, Path]:
+    read_public_key(source)
+    key_name = name or key_name_from_path(source)
+    destination_dir = config.parent / "keys"
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination = destination_dir / source.name
+    if destination.exists() and not force:
+        raise ConfigError(f"Copied key already exists: {destination}")
+    add_key(data, key_name, file=source.name, label=label, force=force)
+    shutil.copyfile(source, destination)
+    return key_name, destination
 
 
 if __name__ == "__main__":

@@ -3,12 +3,14 @@ import tempfile
 import unittest
 
 from nodestrap.config import (
+    add_key,
     add_host,
     add_user,
     empty_config,
     hosts_by_status,
     load_config,
     selected_hosts,
+    set_defaults,
     validate_config,
     write_config,
 )
@@ -76,6 +78,7 @@ class ConfigValidationTests(unittest.TestCase):
         self.assertIn("defaults.connect_user is not a valid account name: bad user", messages)
         self.assertIn("defaults.ssh_port must be an integer between 1 and 65535.", messages)
         self.assertIn("defaults.disable_password_auth must be a boolean.", messages)
+        self.assertNotIn("defaults.public_key references unknown key: missing", messages)
         self.assertIn("users.rion.username is not a valid account name: Rion", messages)
         self.assertIn("users.rion references unknown key: missing_key", messages)
         self.assertIn("hosts[0].status is invalid: mystery", messages)
@@ -97,6 +100,34 @@ class ConfigValidationTests(unittest.TestCase):
 
 
 class ConfigMutationTests(unittest.TestCase):
+    def test_set_defaults_and_add_key(self):
+        data = empty_config()
+
+        set_defaults(
+            data,
+            connect_user="admin",
+            managed_user="rion",
+            public_key="home",
+            ssh_port=2222,
+            disable_password_auth=False,
+        )
+        add_key(data, "home", file="home.pub", label="Home")
+
+        self.assertEqual("admin", data["defaults"]["connect_user"])
+        self.assertEqual("rion", data["defaults"]["managed_user"])
+        self.assertEqual("home", data["defaults"]["public_key"])
+        self.assertEqual(2222, data["defaults"]["ssh_port"])
+        self.assertFalse(data["defaults"]["disable_password_auth"])
+        self.assertEqual("Home", data["keys"]["home"]["label"])
+
+    def test_default_public_key_must_reference_known_key(self):
+        data = empty_config()
+        data["defaults"]["public_key"] = "missing"
+
+        messages = [issue.message for issue in validate_config(data)]
+
+        self.assertIn("defaults.public_key references unknown key: missing", messages)
+
     def test_add_user_and_host_from_defaults(self):
         data = empty_config()
         data["defaults"]["connect_user"] = "admin"
